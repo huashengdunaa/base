@@ -1,9 +1,6 @@
 package com.demo;
 
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 //TIP 要<b>运行</b>代码，请按 <shortcut actionId="Run"/> 或
