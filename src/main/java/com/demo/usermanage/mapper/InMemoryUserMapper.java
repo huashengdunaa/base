@@ -1,7 +1,7 @@
 package com.demo.usermanage.mapper;
 
 import com.demo.usermanage.entity.User;
-import org.mindrot.jbcrypt.BCrypt;
+import com.demo.usermanage.util.PasswordUtil;
 import org.springframework.stereotype.Repository;
 
 import javax.annotation.PostConstruct;
@@ -38,7 +38,7 @@ public class InMemoryUserMapper implements UserMapper {
     private void insertFakeUser(String username, String rawPassword, String email, int status) {
         User u = new User();
         u.setUsername(username);
-        u.setPassword(BCrypt.hashpw(rawPassword, BCrypt.gensalt(10)));
+        u.setPassword(PasswordUtil.encrypt(rawPassword));
         u.setEmail(email);
         u.setStatus(status);
         u.setCreatedAt(LocalDateTime.now());

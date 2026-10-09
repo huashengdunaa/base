@@ -7,7 +7,7 @@ import com.demo.usermanage.dto.UserCreateRequest;
 import com.demo.usermanage.dto.UserUpdateRequest;
 import com.demo.usermanage.entity.User;
 import com.demo.usermanage.mapper.UserMapper;
-import org.mindrot.jbcrypt.BCrypt;
+import com.demo.usermanage.util.PasswordUtil;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -25,9 +25,6 @@ import java.util.List;
  */
 @Service
 public class UserService {
-
-    /** BCrypt 成本因子，与 bcrypt 模块 Demo 保持一致 */
-    private static final int BCRYPT_COST = 12;
 
     private final UserMapper userMapper;
     private final UserCacheService userCacheService;
@@ -56,7 +53,7 @@ public class UserService {
 
         User user = new User();
         user.setUsername(req.getUsername().trim());
-        user.setPassword(hash(req.getPassword()));
+        user.setPassword(PasswordUtil.encrypt(req.getPassword()));
         user.setEmail(req.getEmail().trim());
         user.setStatus(req.getStatus() == null ? 1 : req.getStatus());
         user.setCreatedAt(LocalDateTime.now());
@@ -111,7 +108,7 @@ public class UserService {
         }
 
         if (req.getPassword() != null) {
-            patch.setPassword(hash(req.getPassword()));
+            patch.setPassword(PasswordUtil.encrypt(req.getPassword()));
         }
 
         if (req.getEmail() != null) {
@@ -147,11 +144,6 @@ public class UserService {
         userMapper.logicDelete(id);
         // 删除后必须失效缓存，否则缓存会在 TTL 内继续返回“已删除用户”
         userCacheService.evict(id);
-    }
-
-    /** 明文密码 -> BCrypt 哈希（自带随机盐） */
-    private String hash(String rawPassword) {
-        return BCrypt.hashpw(rawPassword, BCrypt.gensalt(BCRYPT_COST));
     }
 
     private void sleepQuietly(long millis) {
