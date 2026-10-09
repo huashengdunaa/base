@@ -1,0 +1,366 @@
+明白了，你要的是实战编码题，不是选择题那种八股。下面给你一份按难度递进的 Java 实战题清单，每道题都附带考察点和验收标准，你可以直接拿来练手。
+
+Java 进阶实战题清单（10k 水平线）
+
+第一关：Java 核心基础实战
+
+实战 1：手写简易 HashMap
+
+要求：
+• 实现 put(key, value)、get(key)、remove(key) 三个方法
+
+• 底层用数组 + 链表（不需要红黑树）
+
+• 处理 hash 冲突（拉链法）
+
+• 负载因子 0.75，超过阈值扩容 2 倍
+
+• 支持 key 为 null
+
+考察点： hash 算法、取模定位、扩容 rehash、链表操作
+
+验收标准：
+MyHashMap<String, Integer> map = new MyHashMap<>();
+map.put("a", 1);
+map.put("b", 2);
+map.put(null, 99);
+System.out.println(map.get("a")); // 1
+System.out.println(map.get(null)); // 99
+map.remove("a");
+System.out.println(map.get("a")); // null
+
+
+实战 2：生产者-消费者模型
+
+要求：
+• 用 ReentrantLock + Condition 或 BlockingQueue 实现
+
+• 1 个生产者线程、3 个消费者线程
+
+• 缓冲区容量 5
+
+• 生产者每 500ms 生产 1 条消息
+
+• 消费者取到消息后打印「线程名 + 消息内容」
+
+• 运行 30 秒后优雅停止
+
+考察点： 线程通信、wait/notify 或 Lock+Condition、线程安全容器
+
+验收标准： 无假死、无重复消费、无 ArrayIndexOutOfBounds
+
+实战 3：线程池批量下载任务
+
+要求：
+• 模拟 100 个「下载任务」（每个 sleep 随机 1-3 秒）
+
+• 使用 ThreadPoolExecutor 自定义参数（核心 5、最大 10、队列 50）
+
+• 用 CountDownLatch 等待所有任务完成
+
+• 统计总耗时、成功数、失败数
+
+• 超时任务（>5秒）标记为失败
+
+考察点： 线程池参数配置、CountDownLatch、Future + 超时控制
+
+第二关：Spring Boot 业务实战
+
+实战 4：用户管理系统（RESTful API）
+
+要求：
+• Spring Boot + MyBatis + MySQL
+
+• 用户表：id, username, password, email, status, created_at
+
+• 接口：
+
+  • POST /users 创建用户（参数校验：用户名不为空、邮箱格式）
+
+  • GET /users/{id} 查询用户
+
+  • GET /users?page=1&size=10 分页查询
+
+  • PUT /users/{id} 更新用户
+
+  • DELETE /users/{id} 逻辑删除
+
+• 统一响应格式 {"code":200,"msg":"success","data":{}}
+
+• 全局异常处理（@RestControllerAdvice）
+
+• 密码加密存储（BCrypt）
+
+考察点： Spring MVC、参数校验、统一异常处理、分页、MyBatis CRUD
+
+实战 5：Redis 缓存 + 缓存击穿防护
+
+要求：
+• 在实战 4 基础上，给 GET /users/{id} 加 Redis 缓存
+
+• 缓存 key：user:{id}，TTL 30 分钟
+
+• 实现缓存击穿防护（互斥锁或逻辑过期）
+
+• 更新用户时删除缓存（延迟双删）
+
+• 写一个单元测试验证缓存命中
+
+考察点： RedisTemplate 使用、缓存一致性、击穿解决方案
+
+验收标准：
+
+第一次请求 → 查 DB → 写缓存
+第二次请求 → 命中缓存，不查 DB
+更新用户 → 缓存失效 → 下次请求重新查 DB
+
+
+实战 6：登录认证（JWT）
+
+要求：
+• POST /auth/login 登录接口，验证用户名密码
+
+• 成功后返回 JWT Token（包含 userId、过期时间 2 小时）
+
+• GET /users/me 需要 Token 才能访问
+
+• 用 HandlerInterceptor 或 OncePerRequestFilter 做 Token 校验
+
+• Token 过期返回 401
+
+考察点： JWT 原理、拦截器/过滤器、Spring Security 基础（可选）
+
+第三关：数据库实战
+
+实战 7：电商订单表设计与查询优化
+
+要求：
+• 设计三张表：users、products、orders
+
+• orders 表字段：id, user_id, product_id, quantity, total_price, status, created_at
+
+• 写出以下 SQL：
+
+  1. 查询某用户最近 30 天的所有订单
+  2. 查询销量 Top 10 的商品
+  3. 统计每个用户的订单总金额
+• 给合适的字段加索引
+
+• 用 EXPLAIN 分析查询计划，确保命中索引
+
+• 模拟 100 万订单数据（用存储过程或程序批量插入），对比有/无索引的查询耗时
+
+考察点： 表设计、索引设计、EXPLAIN 分析、批量插入
+
+实战 8：事务与锁实战
+
+要求：
+• 实现「下单扣库存」接口
+
+• 商品表有 stock 字段
+
+• 并发场景：100 个线程同时抢 10 件商品
+
+• 用数据库行锁（SELECT ... FOR UPDATE）保证不超卖
+
+• 对比三种方案：
+
+  1. 不加锁（超卖）
+  2. 悲观锁（FOR UPDATE）
+  3. 乐观锁（版本号 CAS）
+• 用 JMeter 或代码压测，验证结果
+
+考察点： 事务隔离级别、行锁、乐观锁/悲观锁、并发安全
+
+第四关：中间件实战
+
+实战 9：RabbitMQ 异步解耦
+
+要求：
+• 场景：用户注册后，异步发送欢迎邮件 + 初始化用户积分
+
+• 使用 RabbitMQ：
+
+  • 交换机类型：Topic
+
+  • 两个队列：email.queue、points.queue
+
+  • 路由键：user.registered
+
+• 生产者：用户注册成功后发消息
+
+• 消费者：收到消息分别处理邮件和积分
+
+• 实现消息确认机制（publisher confirm + consumer ack）
+
+• 模拟消费者异常，验证消息重试
+
+考察点： 交换机/队列/绑定、消息确认、幂等性处理
+
+实战 10：Redis 分布式锁
+
+要求：
+• 实现一个 DistributedLock 工具类
+
+• 基于 Redis SET key value NX PX 实现
+
+• 支持：
+
+  • tryLock(timeout) 尝试加锁
+
+  • unlock() 释放锁（Lua 脚本保证原子性）
+
+• 防止误删（value 用 UUID）
+
+• 写测试：10 个线程抢锁，只有一个成功
+
+• 对比 Redisson 的 RLock 实现
+
+考察点： Redis 原子操作、Lua 脚本、分布式锁原理
+
+第五关：综合项目实战
+
+实战 11：短链接生成系统
+
+要求：
+• 功能：输入长 URL → 返回短 URL → 访问短 URL 跳转到长 URL
+
+• 技术栈：Spring Boot + MySQL + Redis + MyBatis
+
+• 短码生成：Base62 编码（a-z A-Z 0-9）
+
+• 接口：
+
+  • POST /shorten 生成短链接
+
+  • GET /{shortCode} 重定向
+
+  • GET /stats/{shortCode} 访问统计
+
+• Redis 缓存短码→长链接映射
+
+• 布隆过滤器防止缓存穿透
+
+• 访问计数用 Redis INCR
+
+考察点： 算法（Base62）、缓存设计、布隆过滤器、重定向
+
+实战 12：文件秒传系统
+
+要求：
+• 上传文件前先计算 MD5
+
+• 如果服务器已存在相同 MD5 的文件，直接返回已有文件地址（秒传）
+
+• 否则分片上传（前端分 5MB 一片）
+
+• 后端合并分片
+
+• 用 Redis 记录上传进度
+
+• 支持断点续传
+
+考察点： 文件 IO、MD5 校验、分片上传、断点续传逻辑
+
+第六关：排错实战（面试官最爱）
+
+实战 13：排查 OOM
+
+要求：
+• 写一段代码故意制造 OutOfMemoryError（堆溢出）
+
+• 启动时加 -Xms64m -Xmx64m -XX:+HeapDumpOnOutOfMemoryError
+
+• 用 MAT 或 jhat 分析 hprof 文件
+
+• 找到内存泄漏的根源
+
+• 写出排查步骤文档
+
+考察点： JVM 参数、内存分析工具、OOM 定位
+
+实战 14：排查 CPU 100%
+
+要求：
+• 写一段死循环代码，让某个线程占满 CPU
+
+• 用 top → top -Hp → jstack 定位到具体线程和代码行
+
+• 或者用 Arthas thread -n 3 直接定位
+
+• 写出完整排查命令链
+
+考察点： Linux 排查命令、jstack 使用、线程状态分析
+
+建议练习顺序
+
+阶段 题目 预计耗时
+
+第 1 周 实战 1、2、3 3-5 天
+
+第 2 周 实战 4、5、6 5-7 天
+
+第 3 周 实战 7、8 4-5 天
+
+第 4 周 实战 9、10 4-5 天
+
+第 5-6 周 实战 11 或 12（选一个做完整项目） 10-14 天
+
+随时穿插 实战 13、14 2-3 天
+
+验收标准总结
+
+手写 HashMap 能跑通基本功能
+
+能独立搭 Spring Boot + MyBatis + MySQL 项目
+
+Redis 缓存能加、能清、能处理击穿
+
+MySQL 索引会设计、EXPLAIN 看得懂
+
+并发场景（抢库存）不超卖
+
+MQ 能发能收、有确认机制
+
+线上出问题能用工具排查
+
+需要我针对其中某道题给出完整参考代码，或者帮你设计一个从零到一的完整项目结构（比如短链接系统），可以直接说哪一道。
+
+
+
+P1​
+MySQL 原理​
+5 周
+能画 B+ 树、讲清 SQL 执行流程、手写 EXPLAIN、说清 RR 下幻读如何被解决
+P1​
+JVM​
+4 周
+内存区域图、读 GC 日志、用 jmap/jstack 定位 OOM 或死锁、说清 G1
+P2​
+Redis 进阶​
+3 周
+缓存三大问题的区别与解法、无 bug 的分布式锁、缓存与 DB 一致性方案
+P2​
+Spring 源码（只读到关键链路）
+3 周
+口述 IoC 启动、Bean 生命周期、AOP 代理选择、循环依赖为何能解
+P3​
+RabbitMQ 可靠性​
+2 周
+画出"confirm → 持久化 → 手动 ack → 死信重试"全链路，排查一次堆积
+P3​
+Linux 排查实战​
+3 周（穿插）
+一套固定排查 SOP + 一个真实问题的火焰图/栈快照证据
+P4​
+Spring Cloud Alibaba 落地​
+4 周
+能跑的 demo（Nacos+Gateway+Sentinel+OpenFeign+Seata），重点是"为什么用"
+P4​
+OceanBase 原理​
+1 周
+讲清"分布式数据库为什么选 Paxos"、"LSM-Tree 为什么写快读慢"
+P5​
+Docker 实用化​
+1 周
+多阶段构建、volume、网络模式、资源限制
