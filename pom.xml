@@ -81,6 +81,13 @@
             <artifactId>spring-boot-starter-amqp</artifactId>
         </dependency>
 
+        <!-- springdoc-openapi：Swagger UI 与 OpenAPI 3 文档（适配 Spring Boot 2.7） -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-ui</artifactId>
+            <version>1.7.0</version>
+        </dependency>
+
         <!-- MyBatis：用户管理 Demo 的 Mapper 注解 SQL（当前用内存伪数据运行，接 MySQL 时直接启用） -->
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>
