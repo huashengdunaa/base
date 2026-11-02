@@ -6,6 +6,8 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -13,6 +15,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+
+import static com.demo.rabbitmq.config.RabbitMqConfig.*;
 
 /**
  * 用户注册接口。
@@ -30,8 +34,11 @@ public class UserController {
 
     private final UserService userService;
 
-    public UserController(UserService userService) {
+    private final RabbitTemplate rabbitTemplate;
+
+    public UserController(UserService userService, RabbitTemplate rabbitTemplate) {
         this.userService = userService;
+        this.rabbitTemplate = rabbitTemplate;
     }
 
     @Operation(
@@ -60,5 +67,19 @@ public class UserController {
         body.put("email", result.getEmail());
         body.put("msgId", result.getMsgId());
         return body;
+    }
+
+    @Operation(summary = "测试mq队列")
+    @PostMapping("/test")
+    public void testMq(){
+        String msgId =  "这是一条测试Id";
+        CorrelationData correlationData = new CorrelationData(msgId);
+        rabbitTemplate.convertAndSend(TEST_EXCHANGE, TEST_ROUTINGKEY, "这是一条测试消息",
+            message -> {
+                // 将 msgId 写入消息头，消费者可从 messageProperties.messageId 取出
+                message.getMessageProperties().setMessageId(msgId);
+                return message;
+            }, correlationData
+        );
     }
 }

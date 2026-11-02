@@ -1,10 +1,6 @@
 package com.demo.rabbitmq.config;
 
-import org.springframework.amqp.core.Binding;
-import org.springframework.amqp.core.BindingBuilder;
-import org.springframework.amqp.core.Queue;
-import org.springframework.amqp.core.QueueBuilder;
-import org.springframework.amqp.core.TopicExchange;
+import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
@@ -31,7 +27,7 @@ import org.springframework.context.annotation.Configuration;
  *   - 生产者发送一条消息，两个队列都会收到一份副本（发布/订阅）。
  *   - 邮件消费者和积分消费者各自独立消费，互不影响，实现异步解耦。
  */
-@Configuration
+//@Configuration
 public class RabbitMqConfig {
 
     /** Topic 交换机名称 */
@@ -46,6 +42,10 @@ public class RabbitMqConfig {
     /** 路由键：用户注册 */
     public static final String ROUTING_KEY_USER_REGISTERED = "user.registered";
 
+    public final static String TEST_QUEUE = "testQueue";
+
+    public final static String TEST_ROUTINGKEY = "routingKey";
+    
     // ========== 交换机 / 队列 / 绑定 ==========
 
     /** Topic 交换机 */
@@ -81,6 +81,18 @@ public class RabbitMqConfig {
         return BindingBuilder.bind(pointsQueue)
                 .to(userExchange)
                 .with(ROUTING_KEY_USER_REGISTERED);
+    }
+
+    @Bean
+    public Queue testQueue(){
+        return new Queue(TEST_QUEUE, true, false, false);
+    }
+
+    @Bean
+    public Binding testBinding(){
+        return BindingBuilder.bind(testQueue())
+                .to(userExchange())
+                .with(TEST_ROUTINGKEY);
     }
 
     // ========== 消息转换器（JSON） ==========
