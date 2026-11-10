@@ -68,18 +68,4 @@ public class UserController {
         body.put("msgId", result.getMsgId());
         return body;
     }
-
-    @Operation(summary = "测试mq队列")
-    @PostMapping("/test")
-    public void testMq(){
-        String msgId =  "这是一条测试Id";
-        CorrelationData correlationData = new CorrelationData(msgId);
-        rabbitTemplate.convertAndSend(TEST_EXCHANGE, TEST_ROUTINGKEY, "这是一条测试消息",
-            message -> {
-                // 将 msgId 写入消息头，消费者可从 messageProperties.messageId 取出
-                message.getMessageProperties().setMessageId(msgId);
-                return message;
-            }, correlationData
-        );
-    }
 }

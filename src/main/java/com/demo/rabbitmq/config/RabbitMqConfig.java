@@ -27,11 +27,15 @@ import org.springframework.context.annotation.Configuration;
  *   - 生产者发送一条消息，两个队列都会收到一份副本（发布/订阅）。
  *   - 邮件消费者和积分消费者各自独立消费，互不影响，实现异步解耦。
  */
-//@Configuration
+@Configuration
 public class RabbitMqConfig {
 
     /** Topic 交换机名称 */
     public static final String USER_EXCHANGE = "user.exchange";
+
+    public static final String RETRY_EXCHANGE = "retry.exchange";
+
+    public static final String USER_DLX = "user.dlx";
 
     /** 邮件队列 */
     public static final String EMAIL_QUEUE = "email.queue";
@@ -39,12 +43,12 @@ public class RabbitMqConfig {
     /** 积分队列 */
     public static final String POINTS_QUEUE = "points.queue";
 
+    public static final String POINTS_RETRY_QUEUE = "ponits.retry.queue";
+
+    public static final String USER_DLQ = "user.dlq";
+
     /** 路由键：用户注册 */
     public static final String ROUTING_KEY_USER_REGISTERED = "user.registered";
-
-    public final static String TEST_QUEUE = "testQueue";
-
-    public final static String TEST_ROUTINGKEY = "routingKey";
     
     // ========== 交换机 / 队列 / 绑定 ==========
 
@@ -53,6 +57,18 @@ public class RabbitMqConfig {
     public TopicExchange userExchange() {
         // durable=true：交换机持久化，Broker 重启后不丢失
         return new TopicExchange(USER_EXCHANGE, true, false);
+    }
+
+    @Bean
+    public TopicExchange retryExchange() {
+        // durable=true：交换机持久化，Broker 重启后不丢失
+        return new TopicExchange(RETRY_EXCHANGE, true, false);
+    }
+
+    @Bean
+    public TopicExchange userDlx() {
+        // durable=true：交换机持久化，Broker 重启后不丢失
+        return new TopicExchange(USER_DLX, true, false);
     }
 
     /** 邮件队列（持久化） */
@@ -84,15 +100,10 @@ public class RabbitMqConfig {
     }
 
     @Bean
-    public Queue testQueue(){
-        return new Queue(TEST_QUEUE, true, false, false);
-    }
-
-    @Bean
-    public Binding testBinding(){
-        return BindingBuilder.bind(testQueue())
-                .to(userExchange())
-                .with(TEST_ROUTINGKEY);
+    public Binding userDlxBinding(Queue pointsQueue, TopicExchange userDlx) {
+        return BindingBuilder.bind(pointsQueue)
+                .to(userDlx)
+                .with(ROUTING_KEY_USER_REGISTERED);
     }
 
     // ========== 消息转换器（JSON） ==========

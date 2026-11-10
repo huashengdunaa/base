@@ -8,7 +8,8 @@
 - 说清 交换机 / 队列 / 绑定 / 路由键 的关系；
 - 独立设计一个「用户注册 → 异步发邮件 + 初始化积分」的 MQ 拓扑；
 - 理解并实现 发布确认、持久化、手动 ACK、幂等消费；
-- 遇到「消息没消费」「消息重复」「消息丢失」时知道从哪查。
+- 掌握 TTL 与死信队列（DLX / DLQ），能搭建「失败 → 延迟重试 → 最终死信」链路；
+- 遇到「消息没消费」「消息重复」「消息丢失」「消息过期」时知道从哪查。
 
 运行环境：RabbitMQ 3.13（Docker 容器 `rabbitmq-learning`），Spring Boot 2.7.18 + Spring AMQP，Java 11。
 
@@ -246,11 +247,205 @@ spring.rabbitmq.template.mandatory=true
 - 处理失败 → `basicNack(requeue=true)` → 消息回队列，重新投递。
 - 消费者进程崩溃（未 ACK 就断开）→ Broker 把该消息重新置为 ready，投给其他消费者。
 
-因此消费端必须做到**幂等**（见下一节），因为消息可能被投递多次。
+因此消费端必须做到**幂等**（见第九节），因为消息可能被投递多次。
 
 ---
 
-## 六、重试与死信（项目现状 + 生产改法）
+## 六、消息 TTL 与队列过期
+
+TTL（Time To Live，存活时间）控制消息或队列的存活时长，是延迟任务、重试阶梯和防止消息堆积的基础。
+
+### 1. 三种 TTL 别混
+
+| 类型 | 设置位置 | 参数 | 作用范围 | 到期后 |
+|---|---|---|---|---|
+| 消息 TTL（per-message） | 每条消息的消息属性 | `expiration` | 只作用于该条消息 | 丢弃；队列配了 DLX 则转死信 |
+| 队列 TTL（per-queue） | 队列声明参数 | `x-message-ttl` | 队列内所有消息 | 丢弃；队列配了 DLX 则转死信 |
+| 队列过期（queue expiration） | 队列声明参数 | `x-expires` | 整个队列 | 队列及其中消息一起删除，**不触发死信** |
+
+关键规则：
+
+- 消息同时受队列 TTL 和自身 `expiration` 约束时，**取较小的那个**。
+- 消息 TTL **不是在到期瞬间删除**：classic 队列在消息到达**队首**时才判断是否过期。若队首消息 TTL 很长，后面的消息即使已过期也要排队等它先出队。
+- `x-expires` 计算的是队列**空闲时长**（没有消费者、没有 basic.get、没有重新声明），适合临时队列；长期业务队列不要设。
+- 修改队列的 TTL / DLX / 队列类型等参数，必须先删旧队列再重建，否则启动报 `406 PRECONDITION_FAILED`。
+
+### 2. 声明方式（Spring AMQP）
+
+```java
+// 队列级 TTL：队列内消息最多活 60 秒；队列空闲 30 分钟自动删除；最多存 1 万条
+Queue ttlQueue = QueueBuilder.durable("points.ttl.queue")
+        .ttl(60_000)                 // x-message-ttl，单位毫秒
+        .expires(1_800_000)          // x-expires，单位毫秒（30 分钟）
+        .maxLength(10_000)           // x-max-length，超出按 x-overflow 处理
+        .build();
+
+// 消息级 TTL：发送时逐条设置（单位毫秒，注意是字符串）
+rabbitTemplate.convertAndSend(EXCHANGE, ROUTING_KEY, event, message -> {
+    message.getMessageProperties().setExpiration("5000"); // 5 秒后过期
+    return message;
+});
+```
+
+命令行与管理台：
+
+```bash
+# 查看队列上生效的参数
+docker exec -it rabbitmq-learning rabbitmqctl list_queues name arguments
+
+# 用策略批量设置 TTL（比逐个队列声明参数更适合运维调整）
+docker exec -it rabbitmq-learning rabbitmqctl set_policy ttl "^points\." '{"message-ttl":60000}' --apply-to queues
+```
+
+> `expiration` 必须是**毫秒数字的字符串**（如 `"5000"`），写成数字或 `"5s"` 都不生效；`x-message-ttl` 则是数字类型的队列参数。**不设置才表示不过期**，设为 0 表示消息只有在消费者可立即投递时才能存活，否则马上过期，不要用 0 代表"永不过期"。
+
+### 3. 典型用途与常见坑
+
+| 用途 | 做法 |
+|---|---|
+| 延迟消息 | 队列 TTL + DLX 把消息转到目标队列（见第八节） |
+| 防止队列无限堆积 | 队列 TTL / 最大长度 + 死信，堆积时保护 Broker 磁盘 |
+| 临时队列自动清理 | `x-expires`，无人使用后自动删除 |
+| 订单未支付超时 | 延迟队列，到期后由消费者执行关单 |
+
+- **同队列混用不同 TTL 会阻塞**：队首消息未过期时，后面已过期的消息不会被清理。多级延迟必须**按延迟时长拆成多个队列**。
+- **消息过期没有"通知"**：只是被移除，没有任何消费者会收到；要处理超时业务必须配置 DLX。
+- **`x-expires` 删除队列后消息直接消失**，不会进死信，也不能恢复。
+
+---
+
+## 七、死信队列（DLX / DLQ）
+
+「死信」指无法被正常消费的消息。死信交换机（DLX）和死信队列（DLQ）本身没有任何特殊类型，就是**普通 exchange + 普通 queue**，只是被业务队列通过 `x-dead-letter-*` 参数挂接。
+
+### 1. 什么时候产生死信
+
+| 触发条件 | 说明 |
+|---|---|
+| 消费者拒绝且不重回队列 | `basicNack(tag, false, false)` 或 `basicReject(tag, false)` |
+| 消息 TTL 过期 | 队列 TTL 或消息 `expiration` 到期，且队列配置了 DLX |
+| 队列达到最大长度 | `x-max-length` / `x-max-length-bytes` 溢出，按 `x-overflow` 策略把队首消息转死信（默认 `drop-head`） |
+| 投递次数超限（quorum 队列） | `x-delivery-limit` 达到上限（RabbitMQ 3.8+） |
+
+注意：`basicNack(tag, false, true)`（requeue=true）**不会产生死信**，只会反复投递。
+
+### 2. 队列上的死信相关参数
+
+| 参数 | 作用 |
+|---|---|
+| `x-dead-letter-exchange` | 死信投递到哪个交换机；不配 routing key 时沿用消息原来的 routing key |
+| `x-dead-letter-routing-key` | 重写死信的 routing key（建议显式指定，避免与原绑定冲突） |
+| `x-max-length` / `x-max-length-bytes` | 队列长度 / 总字节上限 |
+| `x-overflow` | `drop-head`（默认，丢弃队首并转死信）/ `reject-publish`（拒绝新消息，新消息未入队故不会死信；quorum 队列可用 `reject-publish-dlx` 转死信） |
+| `x-message-ttl` | 消息在队列内的最长存活时间 |
+
+### 3. 完整拓扑声明
+
+```
+biz.exchange ──user.registered──> user.queue
+                                     │ nack(requeue=false) / TTL 过期 / 超长
+                                     v
+                                  user.dlx ──user.dead──> user.dlq（告警、落库、人工重放）
+```
+
+```java
+// 死信交换机（普通 Topic 交换机）
+@Bean
+public TopicExchange userDlx() {
+    return new TopicExchange("user.dlx", true, false);
+}
+
+// 死信队列
+@Bean
+public Queue userDlq() {
+    return QueueBuilder.durable("user.dlq").build();
+}
+
+// 死信队列绑定
+@Bean
+public Binding userDlqBinding(Queue userDlq, TopicExchange userDlx) {
+    return BindingBuilder.bind(userDlq).to(userDlx).with("user.dead");
+}
+
+// 业务队列挂上死信参数（同时可加 TTL / 长度上限）
+@Bean
+public Queue pointsQueue() {
+    return QueueBuilder.durable("points.queue")
+            .deadLetterExchange("user.dlx")
+            .deadLetterRoutingKey("user.dead")
+            .ttl(30_000)          // 30 秒未消费也转死信
+            .maxLength(10_000)    // 超过 1 万条按 x-overflow 处理
+            .build();
+}
+```
+
+> 若 `points.queue` 已存在且参数不同，先删旧队列再让应用重建，否则报 406。
+
+### 4. 死信消息的结构
+
+消息体和属性（含 `messageId`）原样保留，Broker 追加 `x-death` 头，记录每次死信的来源与原因：
+
+```json
+"x-death": [
+  {
+    "count": 1,
+    "reason": "rejected",
+    "queue": "points.queue",
+    "exchange": "user.exchange",
+    "routing-keys": ["user.registered"],
+    "time": "2026-11-03 10:00:00"
+  }
+]
+```
+
+| 字段 | 含义 |
+|---|---|
+| `reason` | `rejected`（被 nack/reject）、`expired`（TTL 过期）、`maxlen`（超长） |
+| `count` | 在同一队列、同一原因下的累计死信次数，可作为重试次数依据 |
+| `queue` | 死信来自哪个队列 |
+| `exchange` / `routing-keys` | 原始交换机与路由键 |
+
+另有 `x-first-death-reason`、`x-first-death-queue`、`x-first-death-exchange`，记录**第一次**死信的信息。注意 `x-death` 是数组，多次死信会有多条记录。
+
+### 5. 死信消费类（告警 / 落库 / 人工重放）
+
+```java
+@Component
+public class DeadLetterConsumer {
+
+    @RabbitListener(queues = "user.dlq")
+    public void handleDead(UserRegisteredEvent event, Message message, Channel channel) throws IOException {
+        long tag = message.getMessageProperties().getDeliveryTag();
+        List<?> deaths = (List<?>) message.getMessageProperties().getHeaders().get("x-death");
+
+        // 生产环境：写死信表 + 告警，不要再次 requeue 造成死循环
+        System.err.println("[DLQ] 收到死信, msgId=" + message.getMessageProperties().getMessageId()
+                + ", x-death=" + deaths);
+
+        channel.basicAck(tag, false); // 已落库/告警，确认移除
+    }
+}
+```
+
+死信的三种处理方式：
+
+| 方式 | 适用场景 | 注意 |
+|---|---|---|
+| 告警 + 人工重放 | 毒消息、需要人工修复的业务 | 重放要重新生成 msgId 或沿用幂等键，避免重复 |
+| 定时任务重放 | 下游短时不可用导致的批量死信 | 重放次数仍需上限，防止再次死循环 |
+| 直接丢弃 | 无业务价值、可容忍丢失的消息 | 至少记录日志和监控指标 |
+
+### 6. 使用死信队列的坑
+
+- **DLQ 必须有监控**：没有消费者的 DLQ 会静默堆积，必须配置堆积量告警；也可给 DLQ 设 TTL / 长度上限兜底。
+- **避免死信循环**：DLQ 的绑定不要把消息路由回业务队列；DLX 与业务交换机要分开。
+- **死信 ≠ 重试**：进入 DLQ 的消息默认不会再被自动处理，重试阶梯要靠 TTL 队列把消息"转回"业务队列。
+- **参数不可改**：DLX、TTL、长度上限都是队列声明参数，变更需删队列重建，生产要提前规划。
+- **顺序不保证**：死信进入 DLQ 的顺序不等于原始发送顺序。
+
+---
+
+## 八、失败重试与延迟队列（项目现状 + 生产改法）
 
 ### 项目现状
 
@@ -258,30 +453,119 @@ spring.rabbitmq.template.mandatory=true
 
 **风险**：`requeue=true` 且没有次数上限，等于**无限重试**。如果消息本身有问题（如字段缺失导致必然异常），会形成「失败 → 入队 → 立刻再投递」的忙循环，占满 CPU 和日志。
 
-### 生产标准做法
+### 方案一：TTL + DLX 实现阶梯延迟重试（经典队列常用）
 
-1. 用消息头 `x-death` 或业务表记录重试次数，超过阈值不再 requeue。
-2. 拒绝时 `basicNack(tag, false, false)`，让消息进入**死信队列（DLQ）**。
-3. 声明队列时挂上死信参数：
+原理：业务队列处理失败后 `nack(requeue=false)` 进入 DLX，DLX 把消息路由到「重试队列」；重试队列设置 TTL 且自身 DLX 指回业务交换机，消息过期后被重新投递回业务队列，从而实现「等待 N 秒后再试」。
+
+```
+points.queue ──失败 nack(requeue=false)──> retry.exchange ──> points.retry.queue（TTL=5s）
+     ^                                                              │ 到期后 DLX
+     └──────────── points.retry.exchange / points.retry ◄──────────┘
+```
+
+> 注意：重试队列的 DLX 要指回**只绑定积分业务的交换机**，不能直接指回 `user.exchange`，否则一次重试会再次广播给 `email.queue`，导致欢迎邮件重复发送。
+
+以下为示意配置，实际落地时需要改造 `RabbitMqConfig#pointsQueue`，并新增重试交换机、重试队列及对应绑定：
+
+```java
+// 1) 失败后进入的重试交换机：只负责把消息放进 TTL 队列
+@Bean
+public TopicExchange retryExchange() {
+    return new TopicExchange("retry.exchange", true, false);
+}
+
+// 2) 业务队列：失败时转 retry.exchange
+@Bean
+public Queue pointsQueue() {
+    return QueueBuilder.durable("points.queue")
+            .deadLetterExchange("retry.exchange")
+            .deadLetterRoutingKey("points.retry")
+            .build();
+}
+
+@Bean
+public Binding pointsRetryQueueBinding(Queue pointsRetryQueue, TopicExchange retryExchange) {
+    return BindingBuilder.bind(pointsRetryQueue).to(retryExchange).with("points.retry");
+}
+
+// 3) TTL 重试队列：5 秒后转回积分业务交换机
+@Bean
+public Queue pointsRetryQueue() {
+    return QueueBuilder.durable("points.retry.queue")
+            .ttl(5_000)
+            .deadLetterExchange("points.retry.exchange")
+            .deadLetterRoutingKey("points.retry")
+            .build();
+}
+
+// 4) 积分业务交换机：只入 points.queue，重试回来不会广播到 email.queue
+@Bean
+public TopicExchange pointsRetryExchange() {
+    return new TopicExchange("points.retry.exchange", true, false);
+}
+
+@Bean
+public Binding pointsQueueRetryBinding(Queue pointsQueue, TopicExchange pointsRetryExchange) {
+    return BindingBuilder.bind(pointsQueue).to(pointsRetryExchange).with("points.retry");
+}
+```
+
+**重试次数限制**（否则仍是无限循环）：消费者从 `x-death` 取 `count`，超过阈值时不再 nack 回重试队列，而是主动投递到最终 DLQ 后 ACK：
+
+```java
+int deadCount = getDeathCount(message); // 统计 x-death 中与当前业务队列相关的次数，缺失按 0
+if (deadCount >= MAX_RETRY) {
+    rabbitTemplate.convertAndSend("user.dlx", "user.dead", event); // 转最终死信
+    channel.basicAck(deliveryTag, false);
+    return;
+}
+channel.basicNack(deliveryTag, false, false); // 进入 TTL 重试队列
+```
+
+> `x-death[0]` 只是最近一次死信记录，且每次经过不同队列/原因都会新增条目。统计总重试次数时应遍历数组、按 `queue` 与 `reason` 筛选后求和，直接取下标 0 的 `count` 容易误判。
+
+多级退避（5s → 30s → 1min）就声明多个 TTL 不同的重试队列；**不能在同一队列里混用不同 TTL**（队首阻塞问题见第六节）。
+
+### 方案二：延迟交换机插件
+
+安装 `rabbitmq_delayed_message_exchange` 后声明 `x-delayed-message` 类型交换机，发送时设置 `x-delay` 头即可实现任意延迟，无需为每档延迟建队列：
 
 ```java
 Map<String, Object> args = new HashMap<>();
-args.put("x-dead-letter-exchange", "user.dlx");
-args.put("x-dead-letter-routing-key", "user.dead");
-Queue queue = QueueBuilder.durable(POINTS_QUEUE).withArguments(args).build();
+args.put("x-delayed-type", "topic");
+new CustomExchange("delay.exchange", "x-delayed-message", true, false, args);
+
+// 发送时指定延迟毫秒
+message.getMessageProperties().setHeader("x-delay", 30_000);
 ```
 
-4. 需要「延迟重试」时用两种方案：
-   - 死信 + TTL：`x-message-ttl` 或消息级 `expiration`，过期后进 DLX，再由另一个队列消费，实现 5s/30s/1min 阶梯重试；
-   - `rabbitmq_delayed_message_exchange` 插件：延迟交换机直接支持任意延迟，需先安装插件。
+缺点：插件需要额外安装、消息落盘行为与普通交换机不同，部分托管云服务不开放插件安装。
 
-选择原则：**能立即重试的用应用内重试（Spring Retry），跨进程/长间隔的用 TTL + DLX 或延迟插件**。
+### 方案三：应用内重试（Spring Retry）
 
-> 触发死信有三种情况：消息被 `basicNack/basicReject(requeue=false)`、消息 TTL 过期、队列长度超限。
+```properties
+spring.rabbitmq.listener.simple.retry.enabled=true
+spring.rabbitmq.listener.simple.retry.max-attempts=3
+spring.rabbitmq.listener.simple.retry.initial-interval=1000ms
+spring.rabbitmq.listener.simple.retry.multiplier=2
+# 重试耗尽后不再 requeue，交给队列的 DLX 进入死信
+spring.rabbitmq.listener.simple.default-requeue-rejected=false
+```
+
+适合下游瞬时抖动（连接超时、短暂锁冲突），重试发生在同一进程内，不产生跨队列流量；但进程崩溃会丢失本轮重试计数。
+
+### 选择原则
+
+| 场景 | 推荐方案 |
+|---|---|
+| 下游瞬时故障，重试间隔短 | 方案三：应用内 Spring Retry |
+| 需要 5s/30s/1min 阶梯退避 | 方案一 TTL + DLX，或方案二延迟插件 |
+| 毒消息兜底 | 最终 DLQ + 告警 + 人工/定时重放 |
+| 严格顺序业务 | 单队列单消费者，重试串行化，避免并行消费打乱顺序 |
 
 ---
 
-## 七、幂等消费
+## 九、幂等消费
 
 消息至少投递一次（at-least-once），重复不可避免。项目用 `msgId` 去重：
 
@@ -319,7 +603,7 @@ if (Boolean.FALSE.equals(first)) {
 
 ---
 
-## 八、消费端关键配置：prefetch 与并发
+## 十、消费端关键配置：prefetch 与并发
 
 ```properties
 spring.rabbitmq.listener.simple.acknowledge-mode=manual
@@ -334,7 +618,7 @@ spring.rabbitmq.listener.simple.max-concurrency=1
 
 ---
 
-## 九、动手练习
+## 十一、动手练习
 
 ### 练习 0：启动环境
 
@@ -418,9 +702,28 @@ docker exec -it rabbitmq-learning rabbitmqctl list_queues name messages_ready me
 
 预期 `messages_unacknowledged=1`。此时直接杀掉应用进程（不 ACK），消息会回到 `ready`，应用重启后会被重新消费——这就是「至少一次」的来源，也是必须幂等的原因。
 
+### 练习 7：验证 TTL 过期与死信（只用管理台，不改代码）
+
+1. **Exchanges** 新建 `user.dlx`（type=topic，durable=true）。
+2. **Queues** 新建 `user.dlq`（durable=true），在 `user.dlx` 上添加绑定，routing key 填 `user.dead`。
+3. **Queues** 新建 `points.ttl.queue`（durable=true），Arguments 填：
+
+   | Key | Value |
+   |---|---|
+   | `x-message-ttl` | `5000` |
+   | `x-dead-letter-exchange` | `user.dlx` |
+   | `x-dead-letter-routing-key` | `user.dead` |
+
+4. 进入 `points.ttl.queue` 的 **Publish message**，Routing key 填 `points.ttl.queue`（或直接发布到默认交换机），随便填一段 JSON。
+5. 观察：`points.ttl.queue` 的 Ready 先变为 1，约 5 秒后归 0；`user.dlq` 变为 1。
+6. 在 `user.dlq` 点 **Get messages**，Ack mode 选 `Nack requeue=true` 只查看不取走，展开消息头能看到 `x-death`，`reason=expired`。
+7. 再向 `points.ttl.queue` 发一条消息，立刻用 **Get messages** 以 `Nack requeue=false` 取走，`user.dlq` 会再增加一条，这次 `x-death` 的 `reason=rejected`。
+
+> 注意：`points.ttl.queue` 不要挂消费者，否则消息可能在到期前就被消费走；TTL 只在消息到达队首时判断，"到期"和"被删除"之间可能有延迟。
+
 ---
 
-## 十、常见问题排查
+## 十二、常见问题排查
 
 | 现象 | 优先检查 | 常见原因 |
 |---|---|---|
@@ -431,13 +734,16 @@ docker exec -it rabbitmq-learning rabbitmqctl list_queues name messages_ready me
 | 消息重复处理 | 幂等表 / Redis 占位逻辑 | 未做幂等，或占位时序错误 |
 | `406 PRECONDITION_FAILED` | 队列参数是否变过（DLX、TTL、类型） | 先 Delete 旧队列再重建 |
 | `MessageConversionException` | 收发两端转换器是否一致 | 一端 Java 序列化、一端 JSON |
+| 消息到点没被处理、直接消失 | 队列是否有 TTL / DLX，`expiration` 写法 | TTL 到期被删除；`expiration` 不是毫秒字符串 |
+| 配了 DLX 但死信队列没消息 | 队列的 `x-dead-letter-exchange`、DLX 绑定、nack 参数 | 队列参数未生效（406 后没重建）；nack 时误传 requeue=true；routing key 不匹配 |
+| 队列莫名其妙消失 | 是否设置 `x-expires` 策略 | 队列空闲超时被自动删除，消息一并丢失 |
 | 消费很慢、消息堆积 | `prefetch`、消费者线程数、下游耗时 | prefetch 过大或下游阻塞 |
 
 排查顺序建议：**先看连接 → 再看交换机绑定 → 再看队列三项指标（ready / unacked / consumers）→ 最后看消费者日志**。
 
 ---
 
-## 十一、自测题
+## 十三、自测题
 
 1. 消息是发给交换机还是队列？交换机如何知道该投给哪些队列？
 2. Topic 交换机中 `*` 与 `#` 的区别？绑定键 `order.#` 能否匹配 `order`？
@@ -447,17 +753,25 @@ docker exec -it rabbitmq-learning rabbitmqctl list_queues name messages_ready me
 6. 消费端幂等应该在业务执行前还是执行后占位？各自的风险是什么？
 7. 三个消费者订阅同一个队列，能否保证消息按发送顺序被处理？如何实现严格顺序？
 8. `prefetch=1` 与 `prefetch=20` 分别适合什么场景？
+9. `x-message-ttl` 与消息属性 `expiration` 有什么区别？同时设置时哪个生效？
+10. `x-expires` 和 `x-message-ttl` 分别控制什么？队列过期会让消息进死信吗？
+11. 死信的触发条件有哪些？`basicNack(requeue=true)` 会产生死信吗？
+12. 如何利用 `x-death` 限制重试次数？为什么不能只靠 DLQ 做重试？
+13. 用 TTL + DLX 做延迟重试时，为什么不同延迟要拆多个队列？
 
 参考答案可在文档各章节中找到；面试时重点讲清「可靠性三环节」和「幂等 + 死信」。
 
 ---
 
-## 十二、生产实践清单
+## 十四、生产实践清单
 
 - [ ] 交换机、队列、绑定全部代码声明，禁止只在管理台手工创建。
 - [ ] 关键业务开启 Publisher Confirm + Returns，并对 `ack=false`、Return 做补偿（落库重发 / 告警）。
 - [ ] 消息统一 JSON，带 `messageId` 与业务唯一键，便于幂等和追踪。
 - [ ] 消费端手动 ACK，失败进入重试策略，超过次数转死信队列并告警。
+- [ ] 业务队列显式配置 DLX / DLQ，死信表落库并配置堆积量告警；DLQ 自身设 TTL 或长度上限兜底。
+- [ ] 阶梯重试按延迟时长拆多个 TTL 队列，禁止在同一队列混用不同 TTL。
+- [ ] 消息级 `expiration` 使用毫秒字符串；TTL、DLX 等队列参数变更走「删队列 + 重建」流程。
 - [ ] 幂等表用 Redis 或 DB 唯一约束，设置合理过期时间。
 - [ ] 慢任务调小 prefetch，快任务可适当调大；消费者并发按下游容量评估。
 - [ ] 监控队列堆积、未 ACK 数、消费者数量，设置阈值告警。
@@ -466,7 +780,7 @@ docker exec -it rabbitmq-learning rabbitmqctl list_queues name messages_ready me
 
 ---
 
-## 十三、术语速查
+## 十五、术语速查
 
 | 术语 | 含义 |
 |---|---|
@@ -481,6 +795,13 @@ docker exec -it rabbitmq-learning rabbitmqctl list_queues name messages_ready me
 | ACK / NACK | 确认 / 否认，决定消息删除还是重投 |
 | prefetch | 消费者未 ACK 消息的最大预取数 |
 | DLX / DLQ | 死信交换机 / 死信队列 |
+| TTL | 消息或队列的存活时间（Time To Live） |
+| expiration | 消息级 TTL 属性，毫秒数字的字符串 |
+| x-message-ttl | 队列级消息 TTL 参数（毫秒） |
+| x-expires | 队列空闲过期时间，到期删除整个队列 |
+| x-overflow | 队列超长溢出策略：drop-head / reject-publish |
+| x-death | Broker 追加的死信记录头，含 reason、count 等 |
+| 延迟队列 | 借助 TTL + DLX 或延迟交换机插件实现的定时投递 |
 | Publisher Confirm | Broker 对生产者的接收确认 |
 | Publisher Return | 消息不可路由时退回给生产者 |
 | at-least-once | 至少一次投递，重复需业务幂等 |
