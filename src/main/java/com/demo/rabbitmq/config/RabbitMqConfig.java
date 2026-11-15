@@ -43,13 +43,16 @@ public class RabbitMqConfig {
     /** 积分队列 */
     public static final String POINTS_QUEUE = "points.queue";
 
-    public static final String POINTS_RETRY_QUEUE = "ponits.retry.queue";
+    public static final String POINTS_RETRY_QUEUE = "points.retry.queue";
 
     public static final String USER_DLQ = "user.dlq";
 
     /** 路由键：用户注册 */
     public static final String ROUTING_KEY_USER_REGISTERED = "user.registered";
-    
+
+    public static final String ROUTING_KEY_POINTS_RETRY = "points.retry";
+    public static final String ROUTING_KEY_RETRY_FAIL = "retry.fail";
+
     // ========== 交换机 / 队列 / 绑定 ==========
 
     /** Topic 交换机 */
@@ -80,7 +83,27 @@ public class RabbitMqConfig {
     /** 积分队列（持久化） */
     @Bean
     public Queue pointsQueue() {
-        return QueueBuilder.durable(POINTS_QUEUE).build();
+        return QueueBuilder.durable(POINTS_QUEUE)
+                .deadLetterExchange(RETRY_EXCHANGE)
+                .deadLetterRoutingKey(ROUTING_KEY_POINTS_RETRY)
+                .build();
+    }
+
+    @Bean
+    public Queue pointsRetryQueue() {
+        return QueueBuilder.durable(POINTS_RETRY_QUEUE)
+                .deadLetterExchange(USER_DLX)
+                .deadLetterRoutingKey(ROUTING_KEY_POINTS_RETRY)
+                .ttl(500)
+                .build();
+    }
+
+    // 通用消息最终态队列
+    @Bean
+    public Queue userDlQueue() {
+        return QueueBuilder.durable(USER_DLQ)
+                .ttl(500)
+                .build();
     }
 
     /** 邮件队列绑定到 user.exchange，路由键 user.registered */
@@ -100,10 +123,26 @@ public class RabbitMqConfig {
     }
 
     @Bean
-    public Binding userDlxBinding(Queue pointsQueue, TopicExchange userDlx) {
-        return BindingBuilder.bind(pointsQueue)
+    public Binding pointsOnlyBinding(Queue userDlQueue, TopicExchange userExchange) {
+        return BindingBuilder.bind(userDlQueue)
+                .to(userExchange)
+                .with(ROUTING_KEY_POINTS_RETRY);
+    }
+
+    // 最终态队列绑定
+    @Bean
+    public Binding userDlxBinding(Queue userDlQueue, TopicExchange userDlx) {
+        return BindingBuilder.bind(userDlQueue)
                 .to(userDlx)
-                .with(ROUTING_KEY_USER_REGISTERED);
+                .with(ROUTING_KEY_RETRY_FAIL);
+    }
+
+    // 积分重试队列绑定
+    @Bean
+    public Binding ponitRetryBinding(Queue pointsRetryQueue, TopicExchange retryExchange) {
+        return BindingBuilder.bind(pointsRetryQueue)
+                .to(retryExchange)
+                .with(ROUTING_KEY_POINTS_RETRY);
     }
 
     // ========== 消息转换器（JSON） ==========
