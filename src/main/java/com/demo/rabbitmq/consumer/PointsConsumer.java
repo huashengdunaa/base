@@ -47,7 +47,7 @@ public class PointsConsumer {
         this.rabbitTemplate = rabbitTemplate;
     }
 
-    @RabbitListener(queues = RabbitMqConfig.POINTS_QUEUE)
+    @RabbitListener(queues = RabbitMqConfig.QUEUE_POINTS)
     public void handlePoints(UserRegisteredEvent event, Message message, Channel channel) throws IOException {
         long deliveryTag = message.getMessageProperties().getDeliveryTag();
         String msgId = message.getMessageProperties().getMessageId();
@@ -111,8 +111,8 @@ public class PointsConsumer {
      */
     private void moveToDeadLetter(UserRegisteredEvent event, String msgId) {
         rabbitTemplate.convertAndSend(
-                RabbitMqConfig.USER_DLX,
-                RabbitMqConfig.ROUTING_KEY_RETRY_FAIL,
+                RabbitMqConfig.EXCHANGE_USER_DLX,
+                RabbitMqConfig.ROUTING_KEY_USER_DEAD,
                 event,
                 message -> {
                     message.getMessageProperties().setMessageId(msgId);
@@ -141,7 +141,7 @@ public class PointsConsumer {
                 continue;
             }
             Map<String, Object> death = (Map<String, Object>) item;
-            if (!RabbitMqConfig.POINTS_QUEUE.equals(String.valueOf(death.get("queue")))
+            if (!RabbitMqConfig.QUEUE_POINTS.equals(String.valueOf(death.get("queue")))
                     || !"rejected".equals(String.valueOf(death.get("reason")))) {
                 continue;
             }

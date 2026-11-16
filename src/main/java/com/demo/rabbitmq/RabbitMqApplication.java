@@ -22,6 +22,10 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class RabbitMqApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(RabbitMqApplication.class, args);
+        SpringApplication application = new SpringApplication(RabbitMqApplication.class);
+        // 激活 rabbitmq profile：只加载 application-rabbitmq.properties，
+        // 让 SQL 初始化脚本仅对本模块生效，不影响 jwt / inventory 等其他启动类
+        application.setAdditionalProfiles("rabbitmq");
+        application.run(args);
     }
 }

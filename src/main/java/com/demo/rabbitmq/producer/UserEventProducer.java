@@ -43,7 +43,7 @@ public class UserEventProducer {
         CorrelationData correlationData = new CorrelationData(msgId);
 
         rabbitTemplate.convertAndSend(
-                RabbitMqConfig.USER_EXCHANGE,
+                RabbitMqConfig.EXCHANGE_USER,
                 RabbitMqConfig.ROUTING_KEY_USER_REGISTERED,
                 event,
                 message -> {

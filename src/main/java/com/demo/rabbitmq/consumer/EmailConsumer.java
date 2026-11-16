@@ -29,7 +29,7 @@ public class EmailConsumer {
         this.idempotencyStore = idempotencyStore;
     }
 
-    @RabbitListener(queues = RabbitMqConfig.EMAIL_QUEUE)
+    @RabbitListener(queues = RabbitMqConfig.QUEUE_EMAIL)
     public void handleEmail(UserRegisteredEvent event, Message message, Channel channel) throws IOException {
         long deliveryTag = message.getMessageProperties().getDeliveryTag();
         String msgId = message.getMessageProperties().getMessageId();

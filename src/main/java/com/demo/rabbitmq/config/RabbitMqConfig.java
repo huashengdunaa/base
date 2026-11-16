@@ -1,6 +1,10 @@
 package com.demo.rabbitmq.config;
 
-import org.springframework.amqp.core.*;
+import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueBuilder;
+import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
@@ -9,143 +13,162 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * RabbitMQ 配置：交换机 / 队列 / 绑定、消息转换器、消息确认机制。
+ * RabbitMQ 配置：交换机 / 队列 / 绑定、消息转换器、发布确认。
  *
- * 拓扑（Topic 交换机）：
+ * 命名规范（全模块统一）：
+ *   常量前缀   EXCHANGE_ / QUEUE_ / ROUTING_KEY_，一眼看出是哪类资源
+ *   资源值     <模块>.<用途>，队列以 .queue / .dlq 结尾
  *
- *   user.exchange (topic)
- *        |
- *        |  routingKey = user.registered
- *        |
- *   +----+----+
- *   |         |
- *   v         v
- * email.queue  points.queue
+ * 拓扑：
  *
- * 说明：
- *   - 两个队列绑定到同一个 Topic 交换机、同一个路由键 user.registered。
- *   - 生产者发送一条消息，两个队列都会收到一份副本（发布/订阅）。
- *   - 邮件消费者和积分消费者各自独立消费，互不影响，实现异步解耦。
+ *   user.exchange ──user.registered──┬──> email.queue
+ *                                    └──> points.queue
+ *                                              │ 消费失败 nack(requeue=false)
+ *                                              v
+ *                                        retry.exchange ──points.retry──> points.retry.queue (TTL 5s)
+ *                                              ^                                 │ 到期
+ *                                              └──────points.back────────────────┘
+ *                                                       回到 points.queue
+ *
+ *   重试次数达上限（应用判定）──> user.dlx ──user.dead──> user.dlq（最终态，常驻不删）
+ *
+ * 关键点：
+ *   - retry.exchange 同时承担「去重试队列」和「回业务队列」两个方向，
+ *     靠 routingKey 区分：points.retry 进重试队列，points.back 回业务队列。
+ *   - user.dlq 不设 TTL：死信是排查依据，必须长期保留。
+ *   - user.dlq 只绑定 user.dlx，不绑业务交换机，避免业务消息误入死信。
  */
 @Configuration
 public class RabbitMqConfig {
 
-    /** Topic 交换机名称 */
-    public static final String USER_EXCHANGE = "user.exchange";
+    // ==================== 交换机 ====================
 
-    public static final String RETRY_EXCHANGE = "retry.exchange";
+    /** 业务事件交换机（Topic） */
+    public static final String EXCHANGE_USER = "user.exchange";
 
-    public static final String USER_DLX = "user.dlx";
+    /** 重试交换机（Topic）：负责「进重试队列」与「回业务队列」两个方向 */
+    public static final String EXCHANGE_RETRY = "retry.exchange";
 
-    /** 邮件队列 */
-    public static final String EMAIL_QUEUE = "email.queue";
+    /** 最终死信交换机（Topic） */
+    public static final String EXCHANGE_USER_DLX = "user.dlx";
 
-    /** 积分队列 */
-    public static final String POINTS_QUEUE = "points.queue";
+    // ==================== 队列 ====================
 
-    public static final String POINTS_RETRY_QUEUE = "points.retry.queue";
+    /** 欢迎邮件队列 */
+    public static final String QUEUE_EMAIL = "email.queue";
 
-    public static final String USER_DLQ = "user.dlq";
+    /** 积分初始化队列 */
+    public static final String QUEUE_POINTS = "points.queue";
 
-    /** 路由键：用户注册 */
+    /** 积分重试队列：只等待 TTL 到期，不挂消费者 */
+    public static final String QUEUE_POINTS_RETRY = "points.retry.queue";
+
+    /** 用户死信队列：最终态，落库后人工处理 */
+    public static final String QUEUE_USER_DLQ = "user.dlq";
+
+    // ==================== 路由键 ====================
+
+    /** 用户注册事件 */
     public static final String ROUTING_KEY_USER_REGISTERED = "user.registered";
 
+    /** 业务队列 -> 重试队列 */
     public static final String ROUTING_KEY_POINTS_RETRY = "points.retry";
-    public static final String ROUTING_KEY_RETRY_FAIL = "retry.fail";
 
-    // ========== 交换机 / 队列 / 绑定 ==========
+    /** 重试队列 -> 业务队列（TTL 到期后回流） */
+    public static final String ROUTING_KEY_POINTS_BACK = "points.back";
 
-    /** Topic 交换机 */
+    /** 最终死信投递 */
+    public static final String ROUTING_KEY_USER_DEAD = "user.dead";
+
+    // ==================== 参数 ====================
+
+    /** 重试等待时间：生产建议按退避策略递增，这里固定 5 秒便于观察 */
+    public static final long POINTS_RETRY_TTL_MS = 5_000L;
+
+    // ==================== 交换机 ====================
+
     @Bean
     public TopicExchange userExchange() {
         // durable=true：交换机持久化，Broker 重启后不丢失
-        return new TopicExchange(USER_EXCHANGE, true, false);
+        return new TopicExchange(EXCHANGE_USER, true, false);
     }
 
     @Bean
     public TopicExchange retryExchange() {
-        // durable=true：交换机持久化，Broker 重启后不丢失
-        return new TopicExchange(RETRY_EXCHANGE, true, false);
+        return new TopicExchange(EXCHANGE_RETRY, true, false);
     }
 
     @Bean
-    public TopicExchange userDlx() {
-        // durable=true：交换机持久化，Broker 重启后不丢失
-        return new TopicExchange(USER_DLX, true, false);
+    public TopicExchange userDeadLetterExchange() {
+        return new TopicExchange(EXCHANGE_USER_DLX, true, false);
     }
 
-    /** 邮件队列（持久化） */
+    // ==================== 队列 ====================
+
     @Bean
     public Queue emailQueue() {
-        return QueueBuilder.durable(EMAIL_QUEUE).build();
+        return QueueBuilder.durable(QUEUE_EMAIL).build();
     }
 
-    /** 积分队列（持久化） */
+    /** 积分队列：消费失败（nack 且不 requeue）后经 retry.exchange 进入重试队列 */
     @Bean
     public Queue pointsQueue() {
-        return QueueBuilder.durable(POINTS_QUEUE)
-                .deadLetterExchange(RETRY_EXCHANGE)
+        return QueueBuilder.durable(QUEUE_POINTS)
+                .deadLetterExchange(EXCHANGE_RETRY)
                 .deadLetterRoutingKey(ROUTING_KEY_POINTS_RETRY)
                 .build();
     }
 
+    /**
+     * 积分重试队列：无消费者，消息在此静默等待 TTL 到期，
+     * 到期后由队列的 DLX 按 points.back 送回 points.queue。
+     */
     @Bean
     public Queue pointsRetryQueue() {
-        return QueueBuilder.durable(POINTS_RETRY_QUEUE)
-                .deadLetterExchange(USER_DLX)
-                .deadLetterRoutingKey(ROUTING_KEY_POINTS_RETRY)
-                .ttl(500)
+        return QueueBuilder.durable(QUEUE_POINTS_RETRY)
+                .ttl((int) POINTS_RETRY_TTL_MS)
+                .deadLetterExchange(EXCHANGE_RETRY)
+                .deadLetterRoutingKey(ROUTING_KEY_POINTS_BACK)
                 .build();
     }
 
-    // 通用消息最终态队列
+    /** 最终死信队列：不设 TTL，保证死信可长期排查与重放 */
     @Bean
-    public Queue userDlQueue() {
-        return QueueBuilder.durable(USER_DLQ)
-                .ttl(500)
-                .build();
+    public Queue userDeadLetterQueue() {
+        return QueueBuilder.durable(QUEUE_USER_DLQ).build();
     }
 
-    /** 邮件队列绑定到 user.exchange，路由键 user.registered */
+    // ==================== 绑定 ====================
+
     @Bean
     public Binding emailBinding(Queue emailQueue, TopicExchange userExchange) {
-        return BindingBuilder.bind(emailQueue)
-                .to(userExchange)
-                .with(ROUTING_KEY_USER_REGISTERED);
+        return BindingBuilder.bind(emailQueue).to(userExchange).with(ROUTING_KEY_USER_REGISTERED);
     }
 
-    /** 积分队列绑定到 user.exchange，路由键 user.registered */
     @Bean
     public Binding pointsBinding(Queue pointsQueue, TopicExchange userExchange) {
-        return BindingBuilder.bind(pointsQueue)
-                .to(userExchange)
-                .with(ROUTING_KEY_USER_REGISTERED);
+        return BindingBuilder.bind(pointsQueue).to(userExchange).with(ROUTING_KEY_USER_REGISTERED);
     }
 
+    /** 重试队列：接收 retry.exchange 上 points.retry 的消息 */
     @Bean
-    public Binding pointsOnlyBinding(Queue userDlQueue, TopicExchange userExchange) {
-        return BindingBuilder.bind(userDlQueue)
-                .to(userExchange)
-                .with(ROUTING_KEY_POINTS_RETRY);
+    public Binding pointsRetryBinding(Queue pointsRetryQueue, TopicExchange retryExchange) {
+        return BindingBuilder.bind(pointsRetryQueue).to(retryExchange).with(ROUTING_KEY_POINTS_RETRY);
     }
 
-    // 最终态队列绑定
+    /** 回流绑定：TTL 到期的消息经 points.back 回到业务队列，形成重试闭环 */
     @Bean
-    public Binding userDlxBinding(Queue userDlQueue, TopicExchange userDlx) {
-        return BindingBuilder.bind(userDlQueue)
-                .to(userDlx)
-                .with(ROUTING_KEY_RETRY_FAIL);
+    public Binding pointsBackBinding(Queue pointsQueue, TopicExchange retryExchange) {
+        return BindingBuilder.bind(pointsQueue).to(retryExchange).with(ROUTING_KEY_POINTS_BACK);
     }
 
-    // 积分重试队列绑定
+    /** 最终死信队列绑定到 user.dlx */
     @Bean
-    public Binding ponitRetryBinding(Queue pointsRetryQueue, TopicExchange retryExchange) {
-        return BindingBuilder.bind(pointsRetryQueue)
-                .to(retryExchange)
-                .with(ROUTING_KEY_POINTS_RETRY);
+    public Binding userDeadLetterBinding(Queue userDeadLetterQueue, TopicExchange userDeadLetterExchange) {
+        return BindingBuilder.bind(userDeadLetterQueue).to(userDeadLetterExchange).with(ROUTING_KEY_USER_DEAD);
     }
 
-    // ========== 消息转换器（JSON） ==========
+    // ==================== 消息转换器（JSON） ====================
 
     /**
      * 使用 Jackson 将对象序列化为 JSON 消息体。
@@ -156,7 +179,7 @@ public class RabbitMqConfig {
         return new Jackson2JsonMessageConverter();
     }
 
-    // ========== RabbitTemplate（生产者 + 发布确认） ==========
+    // ==================== RabbitTemplate（生产者 + 发布确认） ====================
 
     /**
      * 配置 RabbitTemplate：
